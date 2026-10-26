@@ -4,7 +4,7 @@
   "description": "Bot desenvolvido sob o comando do Mestre Lucky.",
   "main": "main.js",
   "scripts": {
-    "start": "pm2 start ecosystem.config.js",
+    "start": "node main.js",
     "stop": "pm2 stop IzukoBOT",
     "restart": "pm2 restart IzukoBOT",
     "sh start.sh": "sh start.sh",
@@ -28,6 +28,7 @@
     "node-cron": "^4.2.1",
     "node-webpmux": "^3.2.0",
     "pino": "^7.11.0",
+    "qrcode-terminal": "^0.12.0",
     "sharp": "^0.34.4"
   },
   "engines": {
