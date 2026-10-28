@@ -61,34 +61,65 @@ function installOwnerOnlyCommandGuard({ logger = console, moduleLoader = Module 
   commandGuardInstalled = true;
 }
 
-function isPrivateJid(jid) {
-  return typeof jid === 'string' && (jid.endsWith('@s.whatsapp.net') || jid.endsWith('@lid'));
+function isAuthorizedMessage(message, settings) {
+  const senderJids = [
+    message?.key?.participant,
+    message?.key?.participantPn,
+    message?.key?.senderPn,
+    message?.key?.remoteJid
+  ];
+  return senderJids.some((jid) => isOwnerJid(jid, settings));
 }
 
-function filterUnauthorizedPrivateMessages(upsert, settings = readSettings()) {
+function isPrivateChat(message) {
+  const remoteJid = message?.key?.remoteJid || '';
+  return remoteJid.endsWith('@s.whatsapp.net') || remoteJid.endsWith('@lid');
+}
+
+function privateMessageText(message) {
+  const content = message?.message || {};
+  const unwrapped = content.ephemeralMessage?.message
+    || content.viewOnceMessage?.message
+    || content.viewOnceMessageV2?.message
+    || content.documentWithCaptionMessage?.message
+    || content;
+
+  return unwrapped.conversation
+    || unwrapped.extendedTextMessage?.text
+    || unwrapped.imageMessage?.caption
+    || unwrapped.videoMessage?.caption
+    || unwrapped.documentMessage?.caption
+    || '';
+}
+
+function isPrivateOwnerCommand(message, settings = readSettings()) {
+  if (!isPrivateChat(message) || message?.key?.fromMe || !isAuthorizedMessage(message, settings)) {
+    return false;
+  }
+
+  const prefix = typeof settings.prefix === 'string' ? settings.prefix.trim() : '';
+  return Boolean(prefix && privateMessageText(message).trimStart().startsWith(prefix));
+}
+
+function filterUnauthorizedMessages(upsert, settings = readSettings()) {
   if (!upsert || !Array.isArray(upsert.messages)) {
     return upsert;
   }
 
   const messages = upsert.messages.filter((message) => {
-    const remoteJid = message?.key?.remoteJid;
-    if (message?.key?.fromMe || !isPrivateJid(remoteJid)) {
-      return true;
+    if (isPrivateChat(message)) {
+      return isPrivateOwnerCommand(message, settings);
     }
-
-    const senderJids = [
-      message.key.participant,
-      message.key.participantPn,
-      message.key.senderPn,
-      remoteJid
-    ];
-    return senderJids.some((jid) => isOwnerJid(jid, settings));
+    return isAuthorizedMessage(message, settings);
   });
 
   return messages.length === upsert.messages.length ? upsert : { ...upsert, messages };
 }
 
-function attachPrivateMessageFilter(socket, { logger = console } = {}) {
+function attachPrivateMessageFilter(socket, {
+  logger = console,
+  onUnauthorizedGroupMessage
+} = {}) {
   const eventEmitter = socket?.ev;
   if (!eventEmitter || typeof eventEmitter.emit !== 'function' || patchedSockets.has(eventEmitter)) {
     return;
@@ -99,11 +130,26 @@ function attachPrivateMessageFilter(socket, { logger = console } = {}) {
     if (event !== 'messages.upsert') {
       return originalEmit.call(this, event, data, ...args);
     }
-
-    const filtered = filterUnauthorizedPrivateMessages(data);
-    if (filtered !== data && filtered.messages.length < data.messages.length) {
-      logger.warn(`[Access] Mensagens privadas ignoradas: remetente diferente de ownerNumber.`);
+    if (!Array.isArray(data?.messages)) {
+      return originalEmit.call(this, event, data, ...args);
     }
+
+    const settings = readSettings();
+    for (const message of data?.messages || []) {
+      if (
+        !isAuthorizedMessage(message, settings)
+        && message?.key?.remoteJid?.endsWith('@g.us')
+        && typeof onUnauthorizedGroupMessage === 'function'
+      ) {
+        Promise.resolve()
+          .then(() => onUnauthorizedGroupMessage(message))
+          .catch((error) => {
+            logger.error(`[Access] Falha ao encaminhar mensagem para moderação: ${error.message}`);
+          });
+      }
+    }
+
+    const filtered = filterUnauthorizedMessages(data, settings);
     if (!filtered.messages.length) {
       return true;
     }
@@ -114,9 +160,12 @@ function attachPrivateMessageFilter(socket, { logger = console } = {}) {
 
 module.exports = {
   attachPrivateMessageFilter,
-  filterUnauthorizedPrivateMessages,
+  filterUnauthorizedMessages,
+  isPrivateOwnerCommand,
   guardCommand,
   installOwnerOnlyCommandGuard,
   isOwnerJid,
   normalizeJid
 };
+
+module.exports.filterUnauthorizedPrivateMessages = filterUnauthorizedMessages;

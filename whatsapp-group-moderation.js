@@ -1,14 +1,20 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { isOwnerJid } = require('./whatsapp-access-control');
+const { readConfig } = require('./settings/lib/antiflood-config');
 
 const DATABASE_DIRECTORY = path.join(__dirname, 'banco de dados');
 const SETTINGS_PATH = path.join(__dirname, 'settings', 'settings.json');
+const ANTIFLOOD_CONFIG_PATH = path.join(DATABASE_DIRECTORY, 'antiflood_config.json');
 const STRIKES_PATH = path.join(DATABASE_DIRECTORY, 'antilink_escalation.json');
 const LINK_PATTERN = /\b(?:https?:\/\/|www\.)\S+|\b[a-z\d-]+(?:\.[a-z\d-]+)+(?:\/\S*)?/i;
 const queues = new Map();
+const floodStates = new Map();
 const attachedSockets = new WeakSet();
 let enabledGroupsCache = { expiresAt: 0, groups: new Set() };
+const FLOOD_WINDOW_MS = 10_000;
+const FLOOD_MESSAGE_LIMIT = 10;
+const FLOOD_TIMEOUT_MS = 20_000;
 
 function extractMessageText(message = {}) {
   const content = message.message || {};
@@ -73,13 +79,24 @@ function normalizeParticipant(jid) {
   return typeof jid === 'string' ? jid.replace(/:\d+(?=@)/, '').toLowerCase() : '';
 }
 
-function participantIsAdmin(participants, jid) {
-  const normalized = normalizeParticipant(jid);
+function participantIsAdmin(participants, ...jids) {
+  const normalizedJids = new Set(jids.filter(Boolean).map(normalizeParticipant));
   return participants.some((participant) => {
     const aliases = [participant.id, participant.lid, participant.phoneNumber]
       .map(normalizeParticipant);
-    return aliases.includes(normalized) && Boolean(participant.admin);
+    return Boolean(participant.admin) && aliases.some((alias) => normalizedJids.has(alias));
   });
+}
+
+function botJids(socket, settings = {}) {
+  const credentials = socket?.authState?.creds?.me;
+  return [
+    settings.botLid,
+    socket?.user?.id,
+    socket?.user?.lid,
+    credentials?.id,
+    credentials?.lid
+  ];
 }
 
 function recordLinkStrike(userState, now) {
@@ -94,6 +111,26 @@ function recordLinkStrike(userState, now) {
   return { action: 'timeout', strikes: userState.strikes.length, timeoutSeconds };
 }
 
+function recordFloodMessage(userState, now) {
+  if (userState.mutedUntil > now) {
+    return {
+      action: 'timeout',
+      count: userState.timestamps.length,
+      timeoutSeconds: Math.ceil((userState.mutedUntil - now) / 1000)
+    };
+  }
+
+  userState.timestamps = userState.timestamps.filter((timestamp) => now - timestamp < FLOOD_WINDOW_MS);
+  userState.timestamps.push(now);
+  if (userState.timestamps.length < FLOOD_MESSAGE_LIMIT) {
+    return { action: 'allow', count: userState.timestamps.length, timeoutSeconds: 0 };
+  }
+
+  userState.mutedUntil = now + FLOOD_TIMEOUT_MS;
+  userState.timestamps = [];
+  return { action: 'timeout', count: FLOOD_MESSAGE_LIMIT, timeoutSeconds: FLOOD_TIMEOUT_MS / 1000 };
+}
+
 function senderJid(message) {
   return message.key?.participant || message.key?.participantPn || '';
 }
@@ -105,9 +142,14 @@ function queueBySender(key, work) {
   return current;
 }
 
-async function deleteMessage(socket, groupJid, message, logger) {
+function moderateGroupMessage(socket, message, logger = console) {
+  const key = `${message.key?.remoteJid || ''}:${normalizeParticipant(senderJid(message))}`;
+  return queueBySender(key, () => processGroupMessage(socket, message, logger));
+}
+
+async function deleteMessage(socket, groupJid, message, logger, moderator = 'Anti-Link') {
   await socket.sendMessage(groupJid, { delete: message.key });
-  logger.log(`[Anti-Link] Mensagem removida em ${groupJid}.`);
+  logger.log(`[${moderator}] Mensagem removida em ${groupJid}.`);
 }
 
 async function processGroupMessage(socket, message, logger = console, now = Date.now()) {
@@ -117,8 +159,13 @@ async function processGroupMessage(socket, message, logger = console, now = Date
     message.key?.fromMe
     || !groupJid?.endsWith('@g.us')
     || !authorJid
-    || !enabledAntiLinkGroups(now).has(groupJid)
   ) {
+    return;
+  }
+
+  const antiLinkEnabled = enabledAntiLinkGroups(now).has(groupJid);
+  const antiFloodEnabled = readConfig(ANTIFLOOD_CONFIG_PATH).gruposAtivos.includes(groupJid);
+  if (!antiLinkEnabled && !antiFloodEnabled) {
     return;
   }
 
@@ -133,6 +180,28 @@ async function processGroupMessage(socket, message, logger = console, now = Date
     return;
   }
 
+  let messageDeleted = false;
+  if (antiFloodEnabled) {
+    const stateKey = `${groupJid}:${normalizeParticipant(authorJid)}`;
+    const userState = floodStates.get(stateKey) || { timestamps: [], mutedUntil: 0 };
+    const flood = recordFloodMessage(userState, now);
+    floodStates.set(stateKey, userState);
+
+    if (flood.action === 'timeout') {
+      if (participantIsAdmin(participants, ...botJids(socket, settings))) {
+        await deleteMessage(socket, groupJid, message, logger, 'Anti-Flood');
+        messageDeleted = true;
+        logger.warn(`[Anti-Flood] Mensagens removidas por ${flood.timeoutSeconds}s em ${groupJid}.`);
+      } else {
+        logger.error(`[Anti-Flood] Nao foi possivel apagar mensagens: o bot nao e administrador de ${groupJid}.`);
+      }
+    }
+  }
+
+  if (!antiLinkEnabled) {
+    return;
+  }
+
   const state = readStrikeState();
   const groupState = state[groupJid] || {};
   const userState = groupState[normalizeParticipant(authorJid)] || { strikes: [], mutedUntil: 0 };
@@ -140,20 +209,23 @@ async function processGroupMessage(socket, message, logger = console, now = Date
   const hasLink = LINK_PATTERN.test(text);
 
   if (!hasLink && userState.mutedUntil > now) {
-    await deleteMessage(socket, groupJid, message, logger);
+    if (!messageDeleted) {
+      await deleteMessage(socket, groupJid, message, logger);
+    }
     return;
   }
   if (!hasLink) {
     return;
   }
 
-  const botJid = socket.user?.id;
-  if (!participantIsAdmin(participants, botJid)) {
+  if (!participantIsAdmin(participants, ...botJids(socket, settings))) {
     logger.error(`[Anti-Link] Nao foi possivel aplicar punicoes: o bot nao e administrador de ${groupJid}.`);
     return;
   }
 
-  await deleteMessage(socket, groupJid, message, logger);
+  if (!messageDeleted) {
+    await deleteMessage(socket, groupJid, message, logger);
+  }
   const strike = recordLinkStrike(userState, now);
 
   if (strike.action === 'remove') {
@@ -161,9 +233,6 @@ async function processGroupMessage(socket, message, logger = console, now = Date
     delete groupState[normalizeParticipant(authorJid)];
     state[groupJid] = groupState;
     saveStrikeState(state);
-    await socket.sendMessage(groupJid, {
-      text: '🚫 Membro removido: terceiro link em até 2 minutos.'
-    });
     logger.warn(`[Anti-Link] Remocao aplicada apos 3 links em ${groupJid}.`);
     return;
   }
@@ -171,11 +240,6 @@ async function processGroupMessage(socket, message, logger = console, now = Date
   groupState[normalizeParticipant(authorJid)] = userState;
   state[groupJid] = groupState;
   saveStrikeState(state);
-  if (strike.strikes === 2) {
-    await socket.sendMessage(groupJid, {
-      text: `⚠️ Segundo link em até 2 minutos: mensagens removidas por 20s. No próximo link, o participante será removido do grupo.`
-    });
-  }
   logger.warn(`[Anti-Link] Strike ${strike.strikes}/3; bloqueio de mensagens por ${strike.timeoutSeconds}s.`);
 }
 
@@ -187,9 +251,8 @@ function attachGroupModeration(socket, { logger = console } = {}) {
 
   events.on('messages.upsert', async ({ messages = [] } = {}) => {
     for (const message of messages) {
-      const key = `${message.key?.remoteJid || ''}:${normalizeParticipant(senderJid(message))}`;
       try {
-        await queueBySender(key, () => processGroupMessage(socket, message, logger));
+        await moderateGroupMessage(socket, message, logger);
       } catch (error) {
         logger.error(`[Anti-Link] Falha ao moderar mensagem: ${error.message}`);
       }
@@ -200,9 +263,12 @@ function attachGroupModeration(socket, { logger = console } = {}) {
 
 module.exports = {
   attachGroupModeration,
+  botJids,
   enabledAntiLinkGroups,
   extractMessageText,
+  moderateGroupMessage,
   participantIsAdmin,
   processGroupMessage,
-  recordLinkStrike
+  recordLinkStrike,
+  recordFloodMessage
 };

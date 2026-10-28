@@ -101,11 +101,13 @@ Após conectar a conta do bot, configure `botLid` com o LID dessa conta e `owner
 
 ### Acesso do dono e moderação
 
-O bot descarta mensagens privadas de contas diferentes de `ownerNumber` e bloqueia a execução de comandos por qualquer remetente que não corresponda a esse LID. Em grupos, mensagens de terceiros continuam chegando ao monitor de moderação; comandos e recursos conversacionais disparados por comandos só podem ser invocados pelo dono. Ações automáticas de moderação (como apagar links) continuam permitidas.
+Somente mensagens identificadas como pertencentes ao `ownerNumber` chegam aos handlers de conversa e comandos. Mensagens privadas e mensagens de terceiros em grupos são descartadas sem resposta, aviso de permissão ou outra mensagem ao remetente. Mensagens de terceiros em grupos são encaminhadas apenas ao monitor de moderação para que regras automáticas, como o antilink, continuem funcionando; elas não chegam aos handlers normais do bot. O antilink apaga links e aplica punições sem enviar avisos ao grupo.
 
 Com o antilink ativo no grupo, o bot apaga o link, aplica bloqueio de mensagens por 10 segundos no primeiro link e 20 segundos no segundo. Esse bloqueio é aplicado removendo mensagens do participante enquanto o período estiver ativo, pois o WhatsApp não oferece uma função nativa de “timeout” individual. O terceiro link em uma janela móvel de 2 minutos remove o participante. O bot precisa ser administrador do grupo para apagar mensagens ou remover participantes; administradores humanos e o dono são isentos.
 
 O comando `&antiflood` inicializa a configuração mesmo que `antiflood_config.json` esteja vazio ou não tenha a propriedade `gruposAtivos`. O comando alterna o recurso apenas no grupo em que foi enviado.
+
+Com o antiflood ativado, o bot conta as mensagens de cada participante do grupo em uma janela móvel de 10 segundos. Ao receber a 10ª mensagem dentro dessa janela, apaga essa mensagem e as próximas do participante durante 20 segundos. Esse “timeout” é simulado pela remoção das mensagens, pois o WhatsApp não oferece silenciamento temporário individual; para apagar mensagens, o bot precisa ser administrador. O contador e o timeout ficam em memória e são reiniciados se o processo do bot reiniciar.
 
 ## 📚 Documentação
 
@@ -121,7 +123,7 @@ Para documentação completa sobre todos os comandos e funcionalidades, consulte
 
 ### Moderação
 - `&antilink` - Ativa/desativa proteção contra links
-- `&antiflood` - Ativa/desativa proteção contra spam
+- `&antiflood` - Ativa/desativa proteção contra spam (10 mensagens em menos de 10 segundos: remoção por 20 segundos)
 - `&antiimg` - Ativa/desativa bloqueio de imagens
 - `&mute @usuario 10m` - Silencia um usuário
 

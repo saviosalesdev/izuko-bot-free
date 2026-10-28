@@ -169,8 +169,12 @@ function installBaileysReliability({
         qrTimeout: Math.max(options?.qrTimeout || 0, 120_000)
       }, ...otherArgs]);
 
-      require('./whatsapp-access-control').attachPrivateMessageFilter(socket, { logger });
-      require('./whatsapp-group-moderation').attachGroupModeration(socket, { logger });
+      const moderation = require('./whatsapp-group-moderation');
+      require('./whatsapp-access-control').attachPrivateMessageFilter(socket, {
+        logger,
+        onUnauthorizedGroupMessage: (message) => moderation.moderateGroupMessage(socket, message, logger)
+      });
+      moderation.attachGroupModeration(socket, { logger });
 
       let authDirectoryArchived = false;
       socket.ev.on('connection.update', ({ connection, lastDisconnect } = {}) => {
