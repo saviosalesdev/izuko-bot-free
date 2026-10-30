@@ -222,7 +222,6 @@ function installBaileysReliability({
 
         if (invalidSessionCodes.includes(statusCode)) {
           logger.error('[WhatsApp] Sessao rejeitada pelo servidor; encerrando para reiniciar com autenticacao limpa.');
-          exitProcess(1);
         }
       });
 
