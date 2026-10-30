@@ -62,12 +62,30 @@ function prepareAuthDirectory(authDirectory = AUTH_DIRECTORY, logger = console) 
     return null;
   }
 
-  if (validation.status === 'invalid' || validation.status === 'incomplete') {
+  if (validation.status === 'invalid') {
     return archiveAuthDirectory(
       authDirectory,
-      validation.status === 'invalid'
-        ? 'creds.json esta invalido; iniciando uma autenticacao limpa'
-        : 'a sessao esta incompleta ou o pareamento anterior nao foi concluido',
+      'creds.json esta invalido; iniciando uma autenticacao limpa',
+      logger
+    );
+  }
+
+  if (validation.status === 'incomplete') {
+    const credentials = JSON.parse(
+      fs.readFileSync(path.join(authDirectory, 'creds.json'), 'utf8')
+    );
+    if (
+      credentials.registered !== true
+      && credentials.me?.id
+      && credentials.pairingCode
+    ) {
+      logger.log?.('[WhatsApp] Pareamento incompleto preservado para continuar a autenticacao.');
+      return null;
+    }
+
+    return archiveAuthDirectory(
+      authDirectory,
+      'a sessao registrada esta incompleta; iniciando uma autenticacao limpa',
       logger
     );
   }
@@ -194,23 +212,12 @@ function installBaileysReliability({
           runtimeBaileys.DisconnectReason?.loggedOut ?? 401,
           runtimeBaileys.DisconnectReason?.badSession ?? 500
         ];
-        const credentials = options?.auth?.creds;
-        const incompletePairing = credentials?.registered !== true
-          && Boolean(credentials?.me?.id)
-          && Boolean(credentials?.pairingCode);
-        const pairingWasInterrupted = incompletePairing && [
-          runtimeBaileys.DisconnectReason?.connectionClosed ?? 428,
-          runtimeBaileys.DisconnectReason?.timedOut ?? 408,
-          runtimeBaileys.DisconnectReason?.restartRequired ?? 515
-        ].includes(statusCode);
-        if (!authDirectoryArchived && (invalidSessionCodes.includes(statusCode) || pairingWasInterrupted)) {
+        if (!authDirectoryArchived && invalidSessionCodes.includes(statusCode)) {
           authDirectoryArchived = true;
           try {
             archiveAuthDirectory(
               authDirectory,
-              pairingWasInterrupted
-                ? 'o WhatsApp solicitou reinicio antes de concluir o pareamento; a tentativa incompleta foi preservada'
-                : `o WhatsApp invalidou a sessao (status ${statusCode}); sera necessario parear novamente`,
+              `o WhatsApp invalidou a sessao (status ${statusCode}); sera necessario parear novamente`,
               logger
             );
           } catch (archiveError) {
