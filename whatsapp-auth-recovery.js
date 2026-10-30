@@ -212,7 +212,13 @@ function installBaileysReliability({
           runtimeBaileys.DisconnectReason?.loggedOut ?? 401,
           runtimeBaileys.DisconnectReason?.badSession ?? 500
         ];
-        if (!authDirectoryArchived && invalidSessionCodes.includes(statusCode)) {
+        const credentials = options?.auth?.creds;
+        const pairingInProgress = credentials?.registered !== true
+          && Boolean(credentials?.pairingCode)
+          && Boolean(credentials?.me?.id);
+        const sessionWasInvalidated = invalidSessionCodes.includes(statusCode)
+          && !pairingInProgress;
+        if (!authDirectoryArchived && sessionWasInvalidated) {
           authDirectoryArchived = true;
           try {
             archiveAuthDirectory(
@@ -227,7 +233,11 @@ function installBaileysReliability({
           }
         }
 
-        if (invalidSessionCodes.includes(statusCode)) {
+        if (pairingInProgress && invalidSessionCodes.includes(statusCode)) {
+          logger.warn(
+            `[WhatsApp] Pareamento interrompido pelo servidor (status ${statusCode}); preservando a tentativa incompleta.`
+          );
+        } else if (invalidSessionCodes.includes(statusCode)) {
           logger.error('[WhatsApp] Sessao rejeitada pelo servidor; encerrando para reiniciar com autenticacao limpa.');
         }
       });
