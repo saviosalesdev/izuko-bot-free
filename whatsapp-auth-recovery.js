@@ -15,7 +15,8 @@ function inspectAuthDirectory(authDirectory = AUTH_DIRECTORY) {
 
   const credentialsPath = path.join(authDirectory, 'creds.json');
   if (!fs.existsSync(credentialsPath)) {
-    return { status: 'incomplete', hasSignalKeys: false };
+    // Diretório vazio (ex.: volume novo no Railway) = sem sessão ainda
+    return { status: 'missing', hasSignalKeys: false };
   }
 
   let credentials;
@@ -71,9 +72,25 @@ function prepareAuthDirectory(authDirectory = AUTH_DIRECTORY, logger = console) 
   }
 
   if (validation.status === 'incomplete') {
-    const credentials = JSON.parse(
-      fs.readFileSync(path.join(authDirectory, 'creds.json'), 'utf8')
-    );
+    const credentialsPath = path.join(authDirectory, 'creds.json');
+    if (!fs.existsSync(credentialsPath)) {
+      return null;
+    }
+
+    let credentials;
+    try {
+      credentials = JSON.parse(fs.readFileSync(credentialsPath, 'utf8'));
+    } catch (error) {
+      if (!(error instanceof SyntaxError)) {
+        throw error;
+      }
+      return archiveAuthDirectory(
+        authDirectory,
+        'creds.json esta invalido; iniciando uma autenticacao limpa',
+        logger
+      );
+    }
+
     if (
       credentials.registered !== true
       && credentials.me?.id
@@ -252,6 +269,8 @@ function installBaileysReliability({
 
 function initialize(options = {}) {
   const { authDirectory = AUTH_DIRECTORY, logger = console } = options;
+  fs.mkdirSync(authDirectory, { recursive: true });
+
   configureHeadlessPairing({ ...options, logger });
   const validation = inspectAuthDirectory(authDirectory);
   logger.log?.(`[WhatsApp] Validacao local da sessao: ${validation.status}.`);
